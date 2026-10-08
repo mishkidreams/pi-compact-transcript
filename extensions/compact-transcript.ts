@@ -442,9 +442,10 @@ function textSignalHasVisibleContent(assistantMessageEvent: any): boolean {
 }
 
 function thoughtTickerEnabled(): boolean {
-	// The ticker is a compact replacement for hidden thinking. When thinking is
-	// fully visible, showing the same headline under a tool would be duplicate.
-	return isEnabled() && state.thinkingHidden;
+	// Hidden thinking is its own one-line row in the assistant message, same
+	// place as Pi's "Thinking..." label. A second headline under a tool is the
+	// old hole: it vanishes until a tool exists, and duplicates the row after.
+	return false;
 }
 
 function cleanThoughtHeading(line: string): string {
@@ -871,19 +872,41 @@ function patchAssistantMessageComponent() {
 		this.lastMessage = message;
 		this.contentContainer.clear();
 		this.hasToolCalls = message.content.some((c: any) => c.type === "toolCall");
-
-		// Thinking blocks are suppressed entirely; only real text is rendered.
-		const texts = message.content.filter((c: any) => c.type === "text" && c.text?.trim());
-		if (texts.length === 0) return;
-
-		if (!this.hasToolCalls && state.runningToolIds.size === 0) clearCurrentThought();
+		clearCurrentThought();
 		// Assistant text ends a tool burst. The live path also does this via
 		// message_update events; doing it here too keeps hydrated history from
 		// grouping tool rows across turn boundaries.
-		state.currentBurst = [];
+		if (message.content.some((c: any) => c.type === "text" && c.text?.trim())) state.currentBurst = [];
 
-		this.contentContainer.addChild(new Spacer(1));
-		for (const content of texts) {
+		const label = typeof this.hiddenThinkingLabel === "string" && this.hiddenThinkingLabel.trim()
+			? this.hiddenThinkingLabel.trim()
+			: "Thinking...";
+		const theme = state.currentTheme;
+		let opened = false;
+		let thinkingParts: string[] = [];
+		const open = () => {
+			if (opened) return;
+			this.contentContainer.addChild(new Spacer(1));
+			opened = true;
+		};
+		const flushThinking = () => {
+			if (thinkingParts.length === 0) return;
+			const heading = extractThoughtHeading(thinkingParts.join("\n\n")) || label;
+			thinkingParts = [];
+			const plain = limitPlain(heading);
+			const rendered = theme ? theme.italic(theme.fg("thinkingText", plain)) : plain;
+			open();
+			this.contentContainer.addChild(new Text(rendered, this.outputPad, 0));
+		};
+
+		for (const content of message.content) {
+			if (content?.type === "thinking") {
+				thinkingParts.push(typeof content.thinking === "string" ? content.thinking : "");
+				continue;
+			}
+			flushThinking();
+			if (content?.type !== "text" || !content.text?.trim()) continue;
+			open();
 			this.contentContainer.addChild(
 				new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
 					transform: (markdown: string, availableWidth: number) =>
@@ -897,6 +920,7 @@ function patchAssistantMessageComponent() {
 				}),
 			);
 		}
+		flushThinking();
 		frameCommentary(this, message);
 	};
 
