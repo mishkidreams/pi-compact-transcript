@@ -466,6 +466,15 @@ function extractThoughtHeading(text: unknown): string {
 	return firstLine ? cleanThoughtHeading(firstLine) : "";
 }
 
+function latestThoughtLine(text: string): string {
+	const lines = text.split(/\r?\n/);
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const clean = cleanThoughtHeading(lines[i]);
+		if (clean) return clean;
+	}
+	return "";
+}
+
 function latestThoughtHeading(message: any): string {
 	if (!Array.isArray(message?.content)) return "";
 	for (let i = message.content.length - 1; i >= 0; i--) {
@@ -878,9 +887,6 @@ function patchAssistantMessageComponent() {
 		// grouping tool rows across turn boundaries.
 		if (message.content.some((c: any) => c.type === "text" && c.text?.trim())) state.currentBurst = [];
 
-		const label = typeof this.hiddenThinkingLabel === "string" && this.hiddenThinkingLabel.trim()
-			? this.hiddenThinkingLabel.trim()
-			: "Thinking...";
 		const theme = state.currentTheme;
 		let opened = false;
 		let thinkingParts: string[] = [];
@@ -891,8 +897,12 @@ function patchAssistantMessageComponent() {
 		};
 		const flushThinking = () => {
 			if (thinkingParts.length === 0) return;
-			const heading = extractThoughtHeading(thinkingParts.join("\n\n")) || label;
+			// Pi skips a thinking run whose text trims to nothing. An empty
+			// reasoning item still occupies a content slot, so a label here would
+			// be a blank row that disappears when thinking is shown.
+			const heading = latestThoughtLine(thinkingParts.join("\n"));
 			thinkingParts = [];
+			if (!heading) return;
 			const plain = limitPlain(heading);
 			const rendered = theme ? theme.italic(theme.fg("thinkingText", plain)) : plain;
 			open();
