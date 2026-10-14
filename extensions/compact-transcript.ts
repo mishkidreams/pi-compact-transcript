@@ -903,10 +903,23 @@ function patchAssistantMessageComponent() {
 			const heading = latestThoughtLine(thinkingParts.join("\n"));
 			thinkingParts = [];
 			if (!heading) return;
-			const plain = limitPlain(heading);
-			const rendered = theme ? theme.italic(theme.fg("thinkingText", plain)) : plain;
 			open();
-			this.contentContainer.addChild(new Text(rendered, this.outputPad, 0));
+			// 0.11.1 dropped limitPlain and truncates tool rows inside render(width).
+			// A Text child wraps whatever was pre-cut, so a one-line thought became
+			// two lines whenever the guess was wider than the chat column.
+			const component = this;
+			this.contentContainer.addChild({
+				render: (width: number) => {
+					const pad = Math.max(0, component.outputPad ?? 0);
+					const inset = Math.min(pad, Math.max(0, width));
+					const room = Math.max(0, width - inset);
+					const colored = theme?.fg ? theme.fg("thinkingText", heading) : heading;
+					const styled = typeof theme?.italic === "function" ? theme.italic(colored) : colored;
+					const ellipsis = theme?.fg ? theme.fg("dim", "…") : "…";
+					return [" ".repeat(inset) + truncateToWidth(styled, room, ellipsis)];
+				},
+				invalidate() {},
+			});
 		};
 
 		for (const content of message.content) {

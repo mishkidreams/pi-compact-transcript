@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { initTheme, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, initTheme, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import compactTranscript from "../extensions/compact-transcript.ts";
 
@@ -44,10 +44,55 @@ test("compact tool and thought rows use render width and recover on resize", asy
 		});
 		for (const width of [220, 24, 600]) {
 			const lines = component.render(width);
-			assert.equal(lines.length, 2, "thought ticker stays a single row");
-			assert.equal(stripTerminalSequences(lines[1]), stripTerminalSequences(truncateToWidth(`  ↳ ${heading}`, width, "…")));
+			assert.equal(lines.length, 1, "the under-tool ticker stays off once thinking has its own row");
+			assert.equal(stripTerminalSequences(lines[0]), stripTerminalSequences(truncateToWidth(expected, width, "…")));
 			assert.ok(lines.every((line) => visibleWidth(line) <= width));
 		}
+	} finally {
+		await emit("session_shutdown");
+	}
+});
+
+test("hidden thinking is one line and recovers when the column grows", async () => {
+	const handlers = new Map<string, Function>();
+	const theme = {
+		fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`,
+		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+		itallic: (text: string) => `\x1b[3m${text}\x1b[23m`,
+	} as Theme;
+	const ctx = { ui: { theme, setStatus() {}, setWorkingMessage() {} } } as unknown as ExtensionContext;
+	compactTranscript({
+		on: (event: string, handler: Function) => handlers.set(event, handler),
+		registerCommand() {},
+		registerEntryRenderer() {},
+	} as unknown as ExtensionAPI);
+	const emit = (name: string, event = {}) => handlers.get(name)!(event, ctx);
+	emit("agent_start");
+	try {
+		const heading = `Considering ${"界🙂é ".repeat(35)}END_OF_THOUGHT`;
+		const component = new AssistantMessageComponent(
+			{ content: [{ type: "thinking", thinking: heading }] },
+			true,
+			undefined,
+			"Thinking...",
+			1,
+			[],
+		);
+		const check = (width: number) => {
+			const lines = component.render(width);
+			assert.equal(lines.length, 2, "one blank separator, then one thought line");
+			assert.equal(stripTerminalSequences(lines[0]).trim(), "");
+			const room = Math.max(0, width - 1);
+			assert.equal(stripTerminalSequences(lines[1]), ` ${stripTerminalSequences(truncateToWidth(heading, room, "…"))}`);
+			assert.ok(lines.every((line) => visibleWidth(line) <= width));
+			assert.ok(lines[1].includes("\x1b["), "theme styling is preserved");
+		};
+		check(220);
+		check(24);
+		check(600);
+
+		const empty = new AssistantMessageComponent({ content: [{ type: "thinking", thinking: "  \n" }] }, true);
+		assert.deepEqual(empty.render(80), []);
 	} finally {
 		await emit("session_shutdown");
 	}
