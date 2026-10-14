@@ -58,7 +58,7 @@ test("hidden thinking is one line and recovers when the column grows", async () 
 	const theme = {
 		fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m`,
 		bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
-		itallic: (text: string) => `\x1b[3m${text}\x1b[23m`,
+		italic: (text: string) => `\x1b[3m${text}\x1b[23m`,
 	} as Theme;
 	const ctx = { ui: { theme, setStatus() {}, setWorkingMessage() {} } } as unknown as ExtensionContext;
 	compactTranscript({
@@ -80,12 +80,12 @@ test("hidden thinking is one line and recovers when the column grows", async () 
 		);
 		const check = (width: number) => {
 			const lines = component.render(width);
-			assert.equal(lines.length, 2, "one blank separator, then one thought line");
-			assert.equal(stripTerminalSequences(lines[0]).trim(), "");
+			assert.equal(lines.length, 2, "one thought line, then one blank separator");
 			const room = Math.max(0, width - 1);
-			assert.equal(stripTerminalSequences(lines[1]), ` ${stripTerminalSequences(truncateToWidth(heading, room, "…"))}`);
+			assert.equal(stripTerminalSequences(lines[0]), ` ${stripTerminalSequences(truncateToWidth(heading, room, "…"))}`);
+			assert.equal(stripTerminalSequences(lines[1]).trim(), "");
 			assert.ok(lines.every((line) => visibleWidth(line) <= width));
-			assert.ok(lines[1].includes("\x1b["), "theme styling is preserved");
+			assert.ok(lines[0].includes("\x1b[3m"), "the thought stays italic");
 		};
 		check(220);
 		check(24);
@@ -93,6 +93,30 @@ test("hidden thinking is one line and recovers when the column grows", async () 
 
 		const empty = new AssistantMessageComponent({ content: [{ type: "thinking", thinking: "  \n" }] }, true);
 		assert.deepEqual(empty.render(80), []);
+
+		const plain = (lines: string[]) => lines.map((line) => stripTerminalSequences(line));
+		const thoughtThenAnswer = new AssistantMessageComponent({
+			content: [
+				{ type: "thinking", thinking: "Look" },
+				{ type: "text", text: "Answer" },
+			],
+		}, true);
+		const paired = plain(thoughtThenAnswer.render(80));
+		assert.equal(paired[0], " Look");
+		assert.equal(paired[1].trim(), "", "the separator is under the thought");
+		assert.equal(paired[2]?.trim() === "", false, "the answer does not get a second blank in the same slot");
+		assert.ok(paired.some((line) => line.includes("Answer")));
+
+		const textOnly = new AssistantMessageComponent({ content: [{ type: "text", text: "Answer" }] }, true);
+		assert.equal(plain(textOnly.render(80))[0].trim(), "", "a text-only answer keeps Pi's leading separator");
+
+		const emptyThenText = new AssistantMessageComponent({
+			content: [
+				{ type: "thinking", thinking: "  \n" },
+				{ type: "text", text: "Answer" },
+			],
+		}, true);
+		assert.equal(plain(emptyThenText.render(80))[0].trim(), "", "an empty thought does not eat the text separator");
 	} finally {
 		await emit("session_shutdown");
 	}

@@ -903,7 +903,9 @@ function patchAssistantMessageComponent() {
 			const heading = latestThoughtLine(thinkingParts.join("\n"));
 			thinkingParts = [];
 			if (!heading) return;
-			open();
+			// The separator sits under the thought, not above it. Marking it opened
+			// stops a following answer from inserting a second blank in that slot.
+			// An empty run returns before this, so it does not eat the text separator.
 			// 0.11.1 dropped limitPlain and truncates tool rows inside render(width).
 			// A Text child wraps whatever was pre-cut, so a one-line thought became
 			// two lines whenever the guess was wider than the chat column.
@@ -920,6 +922,8 @@ function patchAssistantMessageComponent() {
 				},
 				invalidate() {},
 			});
+			this.contentContainer.addChild(new Spacer(1));
+			opened = true;
 		};
 
 		for (const content of message.content) {
