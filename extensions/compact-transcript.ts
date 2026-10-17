@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Markdown, MouseRegion, Spacer, Text, stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
 import { createInlineToolInspection } from "./inline-tool-inspection.ts";
+import { cachedLine } from "./cached-line.ts";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -858,16 +859,12 @@ function patchToolExecutionComponent() {
 			return;
 		}
 
-		this.selfRenderContainer.addChild({
-			render: (width: number) => [truncateToWidth(line, Math.max(0, width), theme.fg("dim", "…"))],
-			invalidate() {},
-		});
+		// Old tool summaries are immutable until updateDisplay replaces them. Do not
+		// rescan their ANSI/Unicode on every streamed token or typed character.
+		this.selfRenderContainer.addChild(cachedLine(width => truncateToWidth(line, width, theme.fg("dim", "…"))));
 		const thoughtLine = currentThoughtLine(this.toolCallId, theme);
 		if (thoughtLine) {
-			this.selfRenderContainer.addChild({
-				render: (width: number) => [truncateToWidth(thoughtLine, Math.max(0, width), theme.fg("dim", "…"))],
-				invalidate() {},
-			});
+			this.selfRenderContainer.addChild(cachedLine(width => truncateToWidth(thoughtLine, width, theme.fg("dim", "…"))));
 		}
 	};
 

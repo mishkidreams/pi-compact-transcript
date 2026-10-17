@@ -24,10 +24,11 @@ What it does:
 - In fullscreen, left-click a compact tool row to inspect that result inline. A grouped `N× tool` row first lists its individual calls **below the group header**; click a call to open its original result. Click the header again to collapse. Other calls remain compact, including historical groups from earlier agent turns.
 - Left-click a thinking preview to expand only that thinking run; click the expanded thinking block to collapse it. Local choices do not change the global thinking setting. `Ctrl+O` / `Ctrl+T` remain the global controls.
 - Expanded tool output still uses pi's original renderer, so custom tool output, streaming updates, images and native detail interactions remain owned by pi/provider renderers.
+- Unchanged compact tool rows cache their formatted line for the current width instead of repeating ANSI/Unicode truncation on every streamed token or keystroke. Result updates, resize and invalidation refresh the cache; history and event delivery are unchanged.
 
 ## Install
 
-**Fork note:** the background-notification and inline-click additions described here are on `mishkidreams/pi-compact-transcript`, branch `fix/thinking-row-0.11.1`, loaded directly from a local checkout. The npm/upstream installation examples below do not install those fork-only changes.
+**Fork note:** the background-notification, inline-click and compact-line cache additions described here are on `mishkidreams/pi-compact-transcript`, branch `fix/thinking-row-0.11.1`, loaded directly from a local checkout. The npm/upstream installation examples below do not install those fork-only changes.
 
 ```bash
 pi install npm:pi-compact-transcript
@@ -111,7 +112,7 @@ Clicks are routed through pi's fullscreen mouse handling; regular terminal scrol
 No second copy of Pi or npm dependencies is required. With Node.js 24 supporting native TypeScript stripping, set `PI_ROOT` to the installed `@earendil-works/pi-coding-agent` directory and run from this checkout:
 
 ```powershell
-node --import ./tests/host-loader.mjs --test tests/compact-transcript.test.ts tests/background-notifications.test.ts tests/local-click.test.ts
+node --import ./tests/host-loader.mjs --test tests/compact-transcript.test.ts tests/background-notifications.test.ts tests/local-click.test.ts tests/cached-line.test.ts
 ```
 
-The tests exercise real host components and containers with public fixture text, not a model/session or real terminal. They include stock-click controls, individual/grouped/historical calls, independent thinking runs, global-toggle round trips, updates/errors, width recovery and display-only behavior. A separate offline native SGR/viewport probe was also run against Pi 1.3.0; that is not live user acceptance.
+The tests exercise real host components and containers with public fixture text, not a model/session or real terminal. They include stock-click controls, individual/grouped/historical calls, independent thinking runs, global-toggle round trips, updates/errors, width recovery, cache invalidation and display-only behavior. A separate offline native SGR/viewport probe was also run against Pi 1.3.0; that is not live user acceptance.
