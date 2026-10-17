@@ -7,7 +7,8 @@ import {
 	getMarkdownTheme,
 	ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Markdown, Spacer, Text, stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, Markdown, MouseRegion, Spacer, Text, stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
+import { createInlineToolInspection } from "./inline-tool-inspection.ts";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +39,8 @@ type ToolInfo = {
 	hidden?: boolean;
 	running?: boolean;
 	burstCount?: number;
+	burstIds?: string[];
+	burstOwnerId?: string;
 	startedAt?: number;
 	durationMs?: number;
 	burstDurationMs?: number;
@@ -71,6 +74,12 @@ type SummaryData = {
 	durationMs: number;
 };
 
+type InlineInspection = {
+	component: Component;
+	members: any[];
+	setExpanded: (this: any, expanded: boolean) => void;
+};
+
 type RuntimeState = {
 	config: CompactTranscriptConfig;
 	toolsById: Map<string, ToolInfo>;
@@ -84,6 +93,10 @@ type RuntimeState = {
 	// Live transcript components, so toggling can re-render existing rows.
 	toolComponents: Set<any>;
 	assistantComponents: Set<any>;
+	componentToolInfos: WeakMap<object, ToolInfo>;
+	inlineInspections: WeakMap<object, InlineInspection>;
+	inlineOwners: WeakMap<object, any>;
+	inlineMouseDepth: number;
 	currentTheme?: Theme;
 	thinkingHidden: boolean;
 	currentThoughtHeading?: string;
@@ -179,6 +192,10 @@ function getState(): RuntimeState {
 		runStats: newRunStats(),
 		toolComponents: new Set(),
 		assistantComponents: new Set(),
+		componentToolInfos: new WeakMap(),
+		inlineInspections: new WeakMap(),
+		inlineOwners: new WeakMap(),
+		inlineMouseDepth: 0,
 		thinkingHidden: true,
 	};
 	const runtimeState = globalWithState[STATE_KEY]!;
@@ -186,6 +203,10 @@ function getState(): RuntimeState {
 	// versions when an older extension instance created the state object.
 	runtimeState.config = normalizeConfig(runtimeState.config);
 	runtimeState.thinkingHidden ??= true;
+	runtimeState.componentToolInfos ??= new WeakMap();
+	runtimeState.inlineInspections ??= new WeakMap();
+	runtimeState.inlineOwners ??= new WeakMap();
+	runtimeState.inlineMouseDepth ??= 0;
 	return runtimeState;
 }
 
@@ -552,6 +573,10 @@ function upsertToolInfo(id: string, name: string, args: any, invalidate?: () => 
 		info = { id, name, args, preview: previewFor(name, args) };
 		state.toolsById.set(id, info);
 	}
+	return refreshToolInfo(info, name, args, invalidate);
+}
+
+function refreshToolInfo(info: ToolInfo, name: string, args: any, invalidate?: () => void): ToolInfo {
 	info.name = name;
 	info.args = args;
 	info.preview = previewFor(name, args);
@@ -592,6 +617,8 @@ function joinBurst(info: ToolInfo) {
 	if (!state.currentBurst.some((tool) => tool.id === info.id)) state.currentBurst.push(info);
 	for (const tool of state.currentBurst.slice(0, -1)) setToolHidden(tool, true);
 	info.burstCount = state.currentBurst.length;
+	info.burstIds = state.currentBurst.map(tool => tool.id);
+	for (const member of state.currentBurst) member.burstOwnerId = info.id;
 	previous?.invalidate?.();
 }
 
@@ -652,22 +679,10 @@ function updateToolResult(toolCallId: string, result: any, isError = false, isPa
 	info.invalidate?.();
 }
 
-function compactToolLine(
-	toolCallId: string,
-	name: string,
-	args: any,
-	theme: Theme,
-	invalidate?: () => void,
-	result?: any,
-	isError = false,
-	isPartial = false,
-): string {
-	if (!state.toolsById.has(toolCallId)) hydrateTool(toolCallId, name, args, isError);
-	const info = upsertToolInfo(toolCallId, name, args, invalidate);
-	applyResult(info, result, isError, isPartial);
-	if (info.hidden) return "";
+function compactToolLine(info: ToolInfo, theme: Theme, hasResult: boolean, individual = false): string {
+	if (info.hidden && !individual) return "";
 
-	const isBurst = (info.burstCount ?? 1) > 1;
+	const isBurst = !individual && (info.burstCount ?? 1) > 1;
 	const durationText = formatDuration((isBurst ? (info.burstDurationMs ?? info.durationMs) : info.durationMs) ?? 0);
 	const editStats = isEditTool(info.name) ? formatDiffStats(info.diffStats) : "";
 	const writeStats =
@@ -681,7 +696,7 @@ function compactToolLine(
 	const marker = statusMarker(theme, {
 		running: info.running,
 		isError: info.isError,
-		hasResult: result != null || !!info.result,
+		hasResult: hasResult || !!info.result,
 	});
 	const color = info.isError ? "muted" : "dim";
 	const prefix = isBurst ? `${info.burstCount}× ` : "";
@@ -713,14 +728,75 @@ function compactToolLine(
 	);
 }
 
+function toolInfoFor(component: any): ToolInfo | undefined {
+	return state.componentToolInfos.get(component) ?? state.toolsById.get(component.toolCallId);
+}
+
+function closeInlineInspection(host: any, collapse = true) {
+	const view = state.inlineInspections.get(host);
+	if (!view) return;
+	state.inlineInspections.delete(host);
+	for (const member of view.members) state.inlineOwners.delete(member);
+	if (collapse) for (const member of view.members) view.setExpanded.call(member, false);
+	if (collapse) for (const member of view.members) member.updateDisplay();
+}
+
+function openInlineInspection(host: any, original: { render: Function; handleMouse: Function; setExpanded: (this: any, expanded: boolean) => void }): boolean {
+	if (!state.currentTheme) return false;
+	const info = toolInfoFor(host);
+	if (!info) return false;
+	const ids = (info?.burstCount ?? 1) > 1 ? info?.burstIds : [host.toolCallId];
+	if (!ids?.length || ids.length !== (info?.burstCount ?? 1)) return false;
+	const components = new Map([...state.toolComponents].map(component => [component.toolCallId, component]));
+	const members = ids.map(id => components.get(id));
+	if (members.some(member => !member || !toolInfoFor(member))) return false; // Never guess which hidden call the user meant.
+	const summary = (member: any, individual: boolean): Component => ({
+		render: width => [truncateToWidth(compactToolLine(toolInfoFor(member)!, state.currentTheme!, member.result != null, individual), Math.max(0, width), state.currentTheme!.fg("dim", "…"))],
+		invalidate() {},
+	});
+	const entries = members.map(member => ({
+		summary: summary(member, true),
+		isExpanded: () => !!member.expanded,
+		expand() {
+			if (!member.result) return false;
+			original.setExpanded.call(member, true);
+			member.ui?.requestRender?.();
+			return true;
+		},
+		details: {
+			render: (width: number) => original.render.call(member, width),
+			handleMouse(event: any) {
+				state.inlineMouseDepth++;
+				try { return original.handleMouse.call(member, event); }
+				finally { state.inlineMouseDepth--; }
+			},
+			invalidate: () => member.invalidate(),
+		},
+	}));
+	const component = createInlineToolInspection(entries, members.length > 1 ? {
+		component: summary(host, false),
+		close() { closeInlineInspection(host); host.ui?.requestRender?.(); },
+	} : undefined);
+	state.inlineInspections.set(host, {
+		component, members,
+		setExpanded: original.setExpanded,
+	});
+	for (const member of members) state.inlineOwners.set(member, host);
+	if (members.length === 1) entries[0].expand();
+	host.ui?.requestRender?.();
+	return true;
+}
+
 function patchToolExecutionComponent() {
 	const proto = ToolExecutionComponent.prototype as any;
 	if (typeof proto.updateDisplay !== "function" || typeof proto.render !== "function") return;
 	const existing = proto[TOOL_PATCH_KEY] as
-		| { originalUpdateDisplay: (...args: any[]) => any; originalRender: (...args: any[]) => any }
+		| { originalUpdateDisplay: (...args: any[]) => any; originalRender: (...args: any[]) => any; originalHandleMouse?: (...args: any[]) => any; originalSetExpanded?: (expanded: boolean) => void }
 		| undefined;
 	const originalUpdateDisplay = existing?.originalUpdateDisplay ?? proto.updateDisplay;
 	const originalRender = existing?.originalRender ?? proto.render;
+	const originalHandleMouse = existing?.originalHandleMouse ?? proto.handleMouse;
+	const originalSetExpanded = existing?.originalSetExpanded ?? proto.setExpanded;
 
 	proto.updateDisplay = function patchedUpdateDisplay() {
 		if (!this.toolCallId || !this.toolName || !this.selfRenderContainer || typeof this.selfRenderContainer.clear !== "function") {
@@ -729,18 +805,28 @@ function patchToolExecutionComponent() {
 			return originalUpdateDisplay.call(this);
 		}
 		state.toolComponents.add(this);
+		const inspectionHost = state.inlineOwners.get(this);
+		if (inspectionHost && this.result?.isError) closeInlineInspection(inspectionHost);
 
 		const invalidate = () => {
 			this.invalidate();
 			this.ui?.requestRender?.();
 		};
-		// Must run before upsertToolInfo, which would make the row look
-		// already-known and skip burst reconstruction for rehydrated history.
-		if (!state.toolsById.has(this.toolCallId)) {
-			hydrateTool(this.toolCallId, this.toolName, this.args, this.result?.isError ?? false);
-		}
-		const info = upsertToolInfo(this.toolCallId, this.toolName, this.args, invalidate);
+		// The per-run map is reset at agent_start. Keep the actual historical
+		// component's metadata separately so an old group never becomes a new
+		// live burst (or silently opens only its last member).
+		let info = state.componentToolInfos.get(this);
+		if (!info) {
+			if (!state.toolsById.has(this.toolCallId)) hydrateTool(this.toolCallId, this.toolName, this.args, this.result?.isError ?? false);
+			info = upsertToolInfo(this.toolCallId, this.toolName, this.args, invalidate);
+			state.componentToolInfos.set(this, info);
+		} else refreshToolInfo(info, this.toolName, this.args, invalidate);
 		applyResult(info, this.result, this.result?.isError ?? false, this.isPartial);
+		if (isEnabled() && !this.expanded) {
+			// Burst ownership, unlike an inspection's saved hiding flags, stays
+			// authoritative when new calls arrive or compact is toggled off/on.
+			setToolHidden(info, !info.isError && !!info.burstOwnerId && info.burstOwnerId !== info.id);
+		}
 
 		if (!isEnabled() || this.expanded) {
 			setToolHidden(info, false);
@@ -765,16 +851,7 @@ function patchToolExecutionComponent() {
 			return originalUpdateDisplay.call(this);
 		}
 
-		const line = compactToolLine(
-			this.toolCallId,
-			this.toolName,
-			this.args,
-			theme,
-			invalidate,
-			this.result,
-			this.result?.isError ?? false,
-			this.isPartial,
-		);
+		const line = compactToolLine(info, theme, this.result != null);
 
 		if (!line) {
 			this.__compactTranscriptHidden = true;
@@ -795,12 +872,46 @@ function patchToolExecutionComponent() {
 	};
 
 	proto.render = function patchedRender(width: number) {
+		if (isEnabled()) {
+			const owner = state.inlineOwners.get(this);
+			if (owner && owner !== this) return [];
+			const inspection = state.inlineInspections.get(this);
+			if (inspection) {
+				const info = toolInfoFor(this);
+				if (info?.hidden || (info?.burstOwnerId && info.burstOwnerId !== info.id)) closeInlineInspection(this);
+				else return inspection.component.render(width);
+			}
+		}
 		if (this.hideComponent || this.__compactTranscriptHidden) return [];
 		if (this.__compactTranscriptForceSelf) return this.selfRenderContainer.render(width);
 		return originalRender.call(this, width);
 	};
+	if (typeof originalHandleMouse === "function" && typeof originalSetExpanded === "function") {
+		proto.handleMouse = function (event: any) {
+			if (isEnabled()) {
+				const owner = state.inlineOwners.get(this);
+				if (owner && owner !== this) return undefined;
+				const inspection = state.inlineInspections.get(this);
+				if (inspection) return inspection.component.handleMouse?.(event);
+				if (this.__compactTranscriptForceSelf) {
+					if (this.hideComponent || this.__compactTranscriptHidden || event.y !== 0 || event.type !== "click" || event.button !== "left") return undefined;
+					if (!this.result && (toolInfoFor(this)?.burstCount ?? 1) <= 1) return undefined;
+					if (openInlineInspection(this, { render: originalRender, handleMouse: originalHandleMouse, setExpanded: originalSetExpanded })) return { handled: true };
+					return undefined;
+				}
+			}
+			return originalHandleMouse.call(this, event);
+		};
+		proto.setExpanded = function (expanded: boolean) {
+			if (!state.inlineMouseDepth) {
+				const owner = state.inlineOwners.get(this);
+				if (owner) closeInlineInspection(owner, false);
+			}
+			return originalSetExpanded.call(this, expanded);
+		};
+	}
 
-	proto[TOOL_PATCH_KEY] = { originalUpdateDisplay, originalRender };
+	proto[TOOL_PATCH_KEY] = { originalUpdateDisplay, originalRender, originalHandleMouse, originalSetExpanded };
 }
 
 /** Re-apply pi's markdown transformers (mirrors createMarkdownTransform in pi core).
@@ -870,7 +981,7 @@ function patchAssistantMessageComponent() {
 		if (!isEnabled() || !Array.isArray(message?.content)) {
 			return originalUpdateContent.call(this, message, isStreaming);
 		}
-		if (!this.hideThinkingBlock) {
+		if (!(this.thinkingVisibilityOverrides instanceof Map) || ["length", "aborted", "error"].includes(message.stopReason) || (!this.hideThinkingBlock && this.thinkingVisibilityOverrides.size === 0)) {
 			const result = originalUpdateContent.call(this, message, isStreaming);
 			frameCommentary(this, message);
 			return result;
@@ -892,6 +1003,7 @@ function patchAssistantMessageComponent() {
 		const theme = state.currentTheme;
 		let opened = false;
 		let thinkingParts: string[] = [];
+		let thinkingRunIndex = 0;
 		const open = () => {
 			if (opened) return;
 			this.contentContainer.addChild(new Spacer(1));
@@ -902,9 +1014,12 @@ function patchAssistantMessageComponent() {
 			// Pi skips a thinking run whose text trims to nothing. An empty
 			// reasoning item still occupies a content slot, so a label here would
 			// be a blank row that disappears when thinking is shown.
-			const heading = latestThoughtLine(thinkingParts.join("\n"));
+			const thinking = thinkingParts.map(part => part.trim()).filter(Boolean).join("\n\n");
+			const heading = latestThoughtLine(thinking);
 			thinkingParts = [];
 			if (!heading) return;
+			const runIndex = thinkingRunIndex++;
+			const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
 			// The separator sits under the thought, not above it. Marking it opened
 			// stops a following answer from inserting a second blank in that slot.
 			// An empty run returns before this, so it does not eat the text separator.
@@ -912,7 +1027,7 @@ function patchAssistantMessageComponent() {
 			// A Text child wraps whatever was pre-cut, so a one-line thought became
 			// two lines whenever the guess was wider than the chat column.
 			const component = this;
-			this.contentContainer.addChild({
+			const preview: Component = {
 				render: (width: number) => {
 					const pad = Math.max(0, component.outputPad ?? 0);
 					const inset = Math.min(pad, Math.max(0, width));
@@ -923,7 +1038,17 @@ function patchAssistantMessageComponent() {
 					return [" ".repeat(inset) + truncateToWidth(styled, room, ellipsis)];
 				},
 				invalidate() {},
-			});
+			};
+			const visible = new Markdown(thinking, this.outputPad, 0, this.markdownTheme, {
+				color: (text: string) => theme?.fg ? theme.fg("thinkingText", text) : text,
+				italic: true,
+			}, { transform: (markdown: string, width: number) => applyMarkdownTransformers(markdown, this.markdownTransformers, "assistant-thinking", this.isStreaming, width) });
+			this.contentContainer.addChild(new MouseRegion(hidden ? preview : visible, (event: any) => {
+				if (event.type !== "click" || event.button !== "left") return undefined;
+				this.thinkingVisibilityOverrides.set(runIndex, !hidden);
+				if (this.lastMessage) this.updateContent(this.lastMessage);
+				return { handled: true };
+			}));
 			this.contentContainer.addChild(new Spacer(1));
 			opened = true;
 		};
@@ -1036,6 +1161,7 @@ function refreshTranscript() {
 	let ui: any;
 	for (const component of state.toolComponents) {
 		try {
+			if (!isEnabled()) closeInlineInspection(state.inlineOwners.get(component));
 			// ToolExecutionComponent.invalidate() re-runs updateDisplay.
 			component.invalidate?.();
 			ui ??= component.ui;
@@ -1284,6 +1410,9 @@ export default function compactTranscript(pi: ExtensionAPI) {
 		state.runStats = newRunStats();
 		state.toolComponents = new Set();
 		state.assistantComponents = new Set();
+		state.componentToolInfos = new WeakMap();
+		state.inlineInspections = new WeakMap();
+		state.inlineOwners = new WeakMap();
 		ctx.ui.setWorkingMessage();
 		// Clear any footer status left behind by pre-0.4 versions of this extension.
 		ctx.ui.setStatus(STATUS_KEY, undefined);

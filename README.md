@@ -21,9 +21,13 @@ What it does:
 - Suppresses `Thinking...` markers when thinking is hidden.
 - Works with custom/external tools from other extensions; unknown tools preview their most meaningful string argument (command, code, query, path, url, ...) instead of raw JSON.
 - Background task notifications from the shared `@4fu` task coordinator also collapse to one line. A single update shows its source, task ID, status and duration; batched updates show task/status counts and retain a red marker if any task failed. `Ctrl+O` restores the provider's original detailed view. Other custom messages and unknown payloads are unchanged.
-- Expanded tool output still uses pi's original renderer, so pi's normal tool expansion works when details matter.
+- In fullscreen, left-click a compact tool row to inspect that result inline. A grouped `N× tool` row first lists its individual calls **below the group header**; click a call to open its original result. Click the header again to collapse. Other calls remain compact, including historical groups from earlier agent turns.
+- Left-click a thinking preview to expand only that thinking run; click the expanded thinking block to collapse it. Local choices do not change the global thinking setting. `Ctrl+O` / `Ctrl+T` remain the global controls.
+- Expanded tool output still uses pi's original renderer, so custom tool output, streaming updates, images and native detail interactions remain owned by pi/provider renderers.
 
 ## Install
+
+**Fork note:** the background-notification and inline-click additions described here are on `mishkidreams/pi-compact-transcript`, branch `fix/thinking-row-0.11.1`, loaded directly from a local checkout. The npm/upstream installation examples below do not install those fork-only changes.
 
 ```bash
 pi install npm:pi-compact-transcript
@@ -98,4 +102,16 @@ Toggling re-renders the visible transcript immediately — no reload needed. Wri
 
 This extension changes display only — tool execution is still handled by pi and any other extensions that registered or override tools.
 
-Compact rendering uses pi's public exported TUI components where available. Burst compaction, thinking suppression and background notification compaction rely on pi's current TUI internals; if a future pi release changes those, the affected rows fall back to pi's normal rendering.
+Compact rendering uses pi's public exported TUI components where available. Burst compaction, thinking suppression, inline inspection and background notification compaction rely on pi's current TUI internals. Inline inspection needs the current native tool expansion/mouse methods; unsupported components keep their existing rendering/interaction rather than guessing which call to open.
+
+Clicks are routed through pi's fullscreen mouse handling; regular terminal scrollback has no equivalent guarantee. Drag selection is not treated as a click. Native rapid multi-click selection and bottom-follow scrolling are unchanged: this is not a semantic viewport anchor, virtualization or a global-toggle performance fix. Viewing a block does not write a session entry or change model history.
+
+## Tests against an installed host
+
+No second copy of Pi or npm dependencies is required. With Node.js 24 supporting native TypeScript stripping, set `PI_ROOT` to the installed `@earendil-works/pi-coding-agent` directory and run from this checkout:
+
+```powershell
+node --import ./tests/host-loader.mjs --test tests/compact-transcript.test.ts tests/background-notifications.test.ts tests/local-click.test.ts
+```
+
+The tests exercise real host components and containers with public fixture text, not a model/session or real terminal. They include stock-click controls, individual/grouped/historical calls, independent thinking runs, global-toggle round trips, updates/errors, width recovery and display-only behavior. A separate offline native SGR/viewport probe was also run against Pi 1.3.0; that is not live user acceptance.
