@@ -20,6 +20,7 @@ What it does:
 - Each agent run ends with a one-line summary, e.g. `Read 6 files, edited 2, ran 3 commands, 1 failed · 42s`.
 - Suppresses `Thinking...` markers when thinking is hidden.
 - Works with custom/external tools from other extensions; unknown tools preview their most meaningful string argument (command, code, query, path, url, ...) instead of raw JSON.
+- Background task notifications from the shared `@4fu` task coordinator also collapse to one line. A single update shows its source, task ID, status and duration; batched updates show task/status counts and retain a red marker if any task failed. `Ctrl+O` restores the provider's original detailed view. Other custom messages and unknown payloads are unchanged.
 - Expanded tool output still uses pi's original renderer, so pi's normal tool expansion works when details matter.
 
 ## Install
@@ -97,4 +98,4 @@ Toggling re-renders the visible transcript immediately — no reload needed. Wri
 
 This extension changes display only — tool execution is still handled by pi and any other extensions that registered or override tools.
 
-Compact rendering uses pi's public exported TUI components where available. Burst compaction and thinking suppression rely on pi's current TUI internals; if a future pi release changes those, the affected rows fall back to pi's normal rendering.
+Compact rendering uses pi's public exported TUI components where available. Burst compaction, thinking suppression and background notification compaction rely on pi's current TUI internals; if a future pi release changes those, the affected rows fall back to pi's normal rendering.

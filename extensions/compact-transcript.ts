@@ -2,11 +2,12 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import {
 	AssistantMessageComponent,
 	CONFIG_DIR_NAME,
+	CustomMessageComponent,
 	getAgentDir,
 	getMarkdownTheme,
 	ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, Markdown, Spacer, Text, stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -98,6 +99,7 @@ const DEFAULT_CONFIG: CompactTranscriptConfig = {
 const STATE_KEY = Symbol.for("pi-compact-transcript.state");
 const TOOL_PATCH_KEY = Symbol.for("pi-compact-transcript.tool-patch");
 const ASSISTANT_PATCH_KEY = Symbol.for("pi-compact-transcript.assistant-patch");
+const BACKGROUND_PATCH_KEY = Symbol.for("pi-compact-transcript.background-patch");
 
 // Persisted dismissal flag so users who decline are never asked again.
 const NAG_DISMISSED_KEY = "settingsNagDismissed";
@@ -954,9 +956,78 @@ function patchAssistantMessageComponent() {
 	proto[ASSISTANT_PATCH_KEY] = { originalUpdateContent };
 }
 
+type BackgroundTask = {
+	source: string;
+	taskId: string;
+	event: "ready" | "terminal";
+	status: string;
+	durationMs: number;
+	ok?: boolean;
+};
+
+function isBackgroundTask(value: unknown): value is BackgroundTask {
+	if (!value || typeof value !== "object") return false;
+	const task = value as Partial<BackgroundTask>;
+	return isNonEmptyString(task.source) && isNonEmptyString(task.taskId) && isNonEmptyString(task.status)
+		&& (task.event === "ready" || task.event === "terminal")
+		&& typeof task.durationMs === "number" && Number.isFinite(task.durationMs);
+}
+
+function compactBackgroundTaskLine(message: any, theme: Theme): string | undefined {
+	// These are custom messages, not tool results. The shared task coordinator
+	// uses this type for pwsh, Python and subagent updates, including batches.
+	// Leave other extensions' messages and unknown payloads entirely alone.
+	if (message?.customType !== "pi-background-task-notification") return undefined;
+	const tasks: unknown = message.details?.tasks;
+	if (!Array.isArray(tasks) || tasks.length === 0 || !tasks.every(isBackgroundTask)) return undefined;
+	const clean = (text: string) => oneLine(stripTerminalSequences(text));
+	const status = (task: BackgroundTask) => task.event === "ready" ? "ready" : clean(task.status);
+	const failed = tasks.some((task) => task.ok === false || ["failed", "orphaned"].includes(task.status));
+	const tone = failed ? "error" : tasks.some((task) => !["ready", "completed"].includes(status(task))) ? "warning" : "success";
+	let preview: string;
+	if (tasks.length === 1) {
+		const task = tasks[0];
+		const details = [status(task), formatDuration(Math.max(0, task.durationMs))].filter(Boolean).join(" · ");
+		preview = `${clean(task.source)} ${clean(task.taskId)} {${details}}`;
+	} else {
+		// A single delivery may contain several tasks. Keep all status counts so
+		// a failure later in the batch cannot disappear behind the first task.
+		const counts = new Map<string, number>();
+		for (const task of tasks) counts.set(status(task), (counts.get(status(task)) ?? 0) + 1);
+		// Readiness goes first so narrow rows do not hide requests for input;
+		// failures remain visible in the red marker even if counts are clipped.
+		const details = [...counts]
+			.sort(([a], [b]) => Number(b === "ready") - Number(a === "ready"))
+			.map(([name, count]) => `${count} ${name}`).join(" · ");
+		preview = `${tasks.length} background tasks {${details}}`;
+	}
+	return theme.fg(tone, "◆ ") + theme.fg(failed ? "muted" : "dim", preview);
+}
+
+function patchBackgroundTaskNotifications() {
+	const proto = CustomMessageComponent.prototype as any;
+	if (typeof proto.render !== "function") return;
+	const originalRender = proto[BACKGROUND_PATCH_KEY]?.originalRender ?? proto.render;
+
+	proto.render = function patchedBackgroundRender(width: number) {
+		// Render-time selection also handles already-visible and resumed
+		// messages, on/off toggles and resizing, without retaining components.
+		// Do not rewrite the message or replace the provider's detail renderer.
+		if (isEnabled() && this._expanded === false && state.currentTheme) {
+			const line = compactBackgroundTaskLine(this.message, state.currentTheme);
+			if (line !== undefined) {
+				return [truncateToWidth(line, Math.max(0, width), state.currentTheme.fg("dim", "…"))];
+			}
+		}
+		return originalRender.call(this, width);
+	};
+	proto[BACKGROUND_PATCH_KEY] = { originalRender };
+}
+
 function patchRenderers() {
 	patchToolExecutionComponent();
 	patchAssistantMessageComponent();
+	patchBackgroundTaskNotifications();
 }
 
 // Re-render every transcript row we have touched so toggling applies to the
