@@ -114,6 +114,15 @@ const STATE_KEY = Symbol.for("pi-compact-transcript.state");
 const TOOL_PATCH_KEY = Symbol.for("pi-compact-transcript.tool-patch");
 const ASSISTANT_PATCH_KEY = Symbol.for("pi-compact-transcript.assistant-patch");
 const BACKGROUND_PATCH_KEY = Symbol.for("pi-compact-transcript.background-patch");
+// Optional, synchronous viewer protocol. Scopes never receive live agent events
+// and must not share bursts, inline inspections or visibility with the main chat.
+const SCOPE_FACTORY_KEY = Symbol.for("pi-compact-transcript.scope-factory");
+const ACTIVE_SCOPE_KEY = Symbol.for("pi-compact-transcript.active-scope");
+type RendererScope = { run<T>(operation: () => T): T; dispose(): void };
+type ScopedGlobal = typeof globalThis & {
+	[ACTIVE_SCOPE_KEY]?: RuntimeState;
+	[SCOPE_FACTORY_KEY]?: () => RendererScope;
+};
 
 // Persisted dismissal flag so users who decline are never asked again.
 const NAG_DISMISSED_KEY = "settingsNagDismissed";
@@ -211,7 +220,54 @@ function getState(): RuntimeState {
 	return runtimeState;
 }
 
-const state = getState();
+// The active slot is process-wide, not module-local: old scopes continue to work
+// after /reload replaces the patched methods. All operations are synchronous and
+// restore the previous scope in finally, including nested renders and failures.
+const state = new Proxy(getState(), {
+	get(target, key) { return Reflect.get((globalThis as ScopedGlobal)[ACTIVE_SCOPE_KEY] ?? target, key); },
+	set(target, key, value) { return Reflect.set((globalThis as ScopedGlobal)[ACTIVE_SCOPE_KEY] ?? target, key, value); },
+});
+
+function registerRendererScopes(): void {
+	(globalThis as ScopedGlobal)[SCOPE_FACTORY_KEY] = () => {
+		const local: RuntimeState = {
+			...getState(), toolsById: new Map(), currentBurst: [], hiddenToolIds: new Set(),
+			runningToolIds: new Set(), agentActive: false, blinkOn: true, blinkTimer: undefined,
+			runStats: newRunStats(), toolComponents: new Set(), assistantComponents: new Set(),
+			componentToolInfos: new WeakMap(), inlineInspections: new WeakMap(),
+			inlineOwners: new WeakMap(), inlineMouseDepth: 0, thinkingHidden: true,
+			currentThoughtHeading: undefined, thoughtAnchorId: undefined,
+		};
+		const configKey = () => `${getState().config.enabled}:${getState().config.summaryStyle}:${getState().config.highlightToolActions}`;
+		let previousConfig = configKey();
+		const run = <T>(operation: () => T): T => {
+			const nextConfig = configKey();
+			const changed = previousConfig !== nextConfig || local.currentTheme !== getState().currentTheme;
+			previousConfig = nextConfig;
+			local.config = getState().config;
+			local.currentTheme = getState().currentTheme;
+			const globals = globalThis as ScopedGlobal;
+			const previous = globals[ACTIVE_SCOPE_KEY];
+			globals[ACTIVE_SCOPE_KEY] = local;
+			try {
+				if (changed) refreshTranscript();
+				return operation();
+			} finally { globals[ACTIVE_SCOPE_KEY] = previous; }
+		};
+		return {
+			run,
+			dispose() {
+				run(() => {
+					for (const component of local.toolComponents) closeInlineInspection(component, false);
+					local.toolComponents.clear(); local.assistantComponents.clear();
+					local.toolsById.clear(); local.currentBurst = [];
+					local.hiddenToolIds.clear(); local.runningToolIds.clear();
+					local.componentToolInfos = new WeakMap();
+				});
+			},
+		};
+	};
+}
 
 function isEnabled(): boolean {
 	return state.config.enabled;
@@ -1147,6 +1203,7 @@ function patchBackgroundTaskNotifications() {
 }
 
 function patchRenderers() {
+	registerRendererScopes();
 	patchToolExecutionComponent();
 	patchAssistantMessageComponent();
 	patchBackgroundTaskNotifications();

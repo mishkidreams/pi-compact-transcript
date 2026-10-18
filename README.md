@@ -103,6 +103,8 @@ Toggling re-renders the visible transcript immediately — no reload needed. Wri
 
 This extension changes display only — tool execution is still handled by pi and any other extensions that registered or override tools.
 
+Cooperating child viewers can use the fork's optional **synchronous renderer scopes** to reuse compact tool/group/thinking interactions without sharing the main chat's bursts, call IDs or disclosure state. Shared theme/config changes still apply; the scopes ingest no agent events and write no session/settings data. This paired-viewer addition is currently local, uncommitted work above `70c6121`, not a change already available from npm or the published fork SHA.
+
 Compact rendering uses pi's public exported TUI components where available. Burst compaction, thinking suppression, inline inspection and background notification compaction rely on pi's current TUI internals. Inline inspection needs the current native tool expansion/mouse methods; unsupported components keep their existing rendering/interaction rather than guessing which call to open.
 
 Clicks are routed through pi's fullscreen mouse handling; regular terminal scrollback has no equivalent guarantee. Drag selection is not treated as a click. Native rapid multi-click selection and bottom-follow scrolling are unchanged: this is not a semantic viewport anchor, virtualization or a global-toggle performance fix. Viewing a block does not write a session entry or change model history.
@@ -112,7 +114,7 @@ Clicks are routed through pi's fullscreen mouse handling; regular terminal scrol
 No second copy of Pi or npm dependencies is required. With Node.js 24 supporting native TypeScript stripping, set `PI_ROOT` to the installed `@earendil-works/pi-coding-agent` directory and run from this checkout:
 
 ```powershell
-node --import ./tests/host-loader.mjs --test tests/compact-transcript.test.ts tests/background-notifications.test.ts tests/local-click.test.ts tests/cached-line.test.ts
+node --import ./tests/host-loader.mjs --test tests/compact-transcript.test.ts tests/background-notifications.test.ts tests/local-click.test.ts tests/cached-line.test.ts tests/scoped-renderer.test.ts
 ```
 
 The tests exercise real host components and containers with public fixture text, not a model/session or real terminal. They include stock-click controls, individual/grouped/historical calls, independent thinking runs, global-toggle round trips, updates/errors, width recovery, cache invalidation and display-only behavior. A separate offline native SGR/viewport probe was also run against Pi 1.3.0; that is not live user acceptance.
