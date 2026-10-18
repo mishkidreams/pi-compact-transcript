@@ -863,7 +863,10 @@ function patchToolExecutionComponent() {
 		}
 		state.toolComponents.add(this);
 		const inspectionHost = state.inlineOwners.get(this);
-		if (inspectionHost && this.result?.isError) closeInlineInspection(inspectionHost);
+		// A failure must leave a grouped inspection, but a standalone error can
+		// stay open. setExpanded/invalidate also call updateDisplay; closing an
+		// error's own inspection here would immediately undo the user's click.
+		if (inspectionHost && this.result?.isError && (state.inlineInspections.get(inspectionHost)?.members.length ?? 0) > 1) closeInlineInspection(inspectionHost);
 
 		const invalidate = () => {
 			this.invalidate();
@@ -931,7 +934,8 @@ function patchToolExecutionComponent() {
 			const inspection = state.inlineInspections.get(this);
 			if (inspection) {
 				const info = toolInfoFor(this);
-				if (info?.hidden || (info?.burstOwnerId && info.burstOwnerId !== info.id)) closeInlineInspection(this);
+				// Failed calls render independently even if they retain an old burst owner.
+				if (info?.hidden || (!info?.isError && info?.burstOwnerId && info.burstOwnerId !== info.id)) closeInlineInspection(this);
 				else return inspection.component.render(width);
 			}
 		}

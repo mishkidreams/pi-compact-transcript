@@ -3,7 +3,7 @@ import test, { type TestContext } from "node:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AssistantMessageComponent, initTheme, ToolExecutionComponent, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
-import { Container, stripTerminalSequences, visibleWidth, type Component, type TuiMouseEvent as MouseEvent, type TUI } from "@earendil-works/pi-tui";
+import { Container, Text, stripTerminalSequences, visibleWidth, type Component, type TuiMouseEvent as MouseEvent, type TUI } from "@earendil-works/pi-tui";
 import compactTranscript from "../extensions/compact-transcript.ts";
 
 initTheme("dark", false);
@@ -61,6 +61,54 @@ test("compact tool click opens only the selected inline result and closes it aga
 	assert.equal(plain(b).length, 1, "neighbor remains collapsed");
 	assert.ok(click(a, "read")?.handled);
 	assert.equal(plain(a).length, 1);
+});
+
+for (const name of ["grep", "pwsh"]) test(`a failed ${name} result opens inline and closes on the next header click`, t => {
+	harness(t);
+	const a = new ToolExecutionComponent(name, `click-${nextId++}`, { path: "FAILED.txt" }, {}, undefined, ui, process.cwd());
+	a.updateResult({ content: [{ type: "text", text: "FAILURE_SUMMARY\nFAILURE_DETAIL" }], isError: true }, false);
+	assert.equal(plain(a).length, 1);
+	assert.ok(click(a, name)?.handled, "the failed compact row must route the click");
+	assert.ok(plain(a).some(line => line.includes("FAILURE_DETAIL")), "clicking a failed row must reveal the error details, not immediately collapse them again");
+	a.invalidate();
+	assert.ok(plain(a).some(line => line.includes("FAILURE_DETAIL")), "redraw must preserve the open error");
+	a.updateResult({ content: [{ type: "text", text: "FAILURE_SUMMARY\nUPDATED_FAILURE_DETAIL" }], isError: true }, false);
+	assert.ok(plain(a).some(line => line.includes("UPDATED_FAILURE_DETAIL")), "a repeated error update must refresh the open details");
+	assert.ok(click(a, name)?.handled);
+	assert.equal(plain(a).length, 1);
+});
+
+for (const renderShell of ["default", "self"] as const) test(`a failed custom renderer keeps its native ${renderShell} shell and expansion controls`, t => {
+	harness(t);
+	const a = new ToolExecutionComponent("custom", `click-${nextId++}`, {}, {}, {
+		renderShell,
+		renderCall: () => new Text("CUSTOM_HEADER", 0, 0),
+		renderResult: (_result, { expanded }) => new Text(expanded ? "CUSTOM_ERROR_DETAIL" : "CUSTOM_PREVIEW", 0, 0),
+	}, ui, process.cwd());
+	a.updateResult({ content: [{ type: "text", text: "raw error" }], isError: true }, false);
+	assert.ok(click(a, "custom")?.handled);
+	assert.ok(plain(a).some(line => line.includes("CUSTOM_ERROR_DETAIL")));
+	a.invalidate();
+	assert.ok(plain(a).some(line => line.includes("CUSTOM_ERROR_DETAIL")));
+	assert.ok(click(a, "CUSTOM_HEADER")?.handled);
+	assert.equal(plain(a).length, 1);
+});
+
+for (const selectedIndex of [0, 1]) for (const inspection of ["closed", "listed", "expanded"]) test(`a failed group member ${selectedIndex} remains independently inspectable when the group was ${inspection}`, t => {
+	const { appended } = harness(t);
+	const members = [tool("grep", "GROUP_FIRST.txt"), tool("grep", "GROUP_LAST.txt")];
+	const root = new Container();
+	for (const member of members) root.addChild(member);
+	if (inspection !== "closed") click(root, "2×");
+	if (inspection === "expanded") click(root, line => line.startsWith("  ") && line.includes(selectedIndex === 0 ? "GROUP_FIRST.txt" : "GROUP_LAST.txt"));
+	const failed = members[selectedIndex];
+	failed.updateResult({ content: [{ type: "text", text: "GROUP_FAILURE_SUMMARY\nGROUP_FAILURE_DETAIL" }], isError: true }, false);
+	assert.ok(click(root, selectedIndex === 0 ? "GROUP_FIRST.txt" : "GROUP_LAST.txt")?.handled);
+	assert.ok(plain(root).some(line => line.includes("GROUP_FAILURE_DETAIL")), "a failed member must leave its old group and reveal its own full error");
+	assert.ok(!plain(root).some(line => line.includes(selectedIndex === 0 ? "TOOL_DETAIL_GROUP_LAST.txt" : "TOOL_DETAIL_GROUP_FIRST.txt")), "the successful neighbor stays collapsed");
+	assert.ok(click(root, selectedIndex === 0 ? "GROUP_FIRST.txt" : "GROUP_LAST.txt")?.handled);
+	assert.ok(!plain(root).some(line => line.includes("GROUP_FAILURE_DETAIL")));
+	assert.deepEqual(appended, []);
 });
 
 test("compact thinking click opens that run without changing global thinking visibility", t => {
