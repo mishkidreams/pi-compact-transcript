@@ -10,7 +10,7 @@ import {
 import { type Component, Markdown, MouseRegion, Spacer, Text, stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
 import { createInlineToolInspection } from "./inline-tool-inspection.ts";
 import { cachedLine } from "./cached-line.ts";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -123,12 +123,6 @@ type ScopedGlobal = typeof globalThis & {
 	[ACTIVE_SCOPE_KEY]?: RuntimeState;
 	[SCOPE_FACTORY_KEY]?: () => RendererScope;
 };
-
-// Persisted dismissal flag so users who decline are never asked again.
-const NAG_DISMISSED_KEY = "settingsNagDismissed";
-
-// Only show the startup settings tip once per pi process lifetime.
-let startupSettingsNagShown = false;
 
 function newRunStats(): RunStats {
 	return {
@@ -1292,111 +1286,6 @@ function restoreConfigFromBranch(ctx: ExtensionContext) {
 	state.config = nextConfig;
 }
 
-function readNagDismissedFlag(): boolean {
-	const configPath = join(getAgentDir(), "compact-transcript.json");
-	try {
-		const parsed: unknown = JSON.parse(readFileSync(configPath, "utf8"));
-		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-			return (parsed as Record<string, unknown>)[NAG_DISMISSED_KEY] === true;
-		}
-	} catch {
-		// Missing or unreadable config — assume not dismissed.
-	}
-	return false;
-}
-
-function persistNagDismissed() {
-	const configPath = join(getAgentDir(), "compact-transcript.json");
-	let config: Record<string, unknown> = {};
-	try {
-		const raw = readFileSync(configPath, "utf8");
-		const parsed: unknown = JSON.parse(raw);
-		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-			config = parsed as Record<string, unknown>;
-		}
-	} catch {
-		// File missing or unreadable — start fresh.
-	}
-	config[NAG_DISMISSED_KEY] = true;
-	writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
-}
-
-function checkAndNotifyRecommendedSettings(ctx: ExtensionContext) {
-	if (startupSettingsNagShown) return;
-	startupSettingsNagShown = true;
-
-	// User previously dismissed the dialog.
-	if (readNagDismissedFlag()) return;
-
-	const settingsPath = join(getAgentDir(), "settings.json");
-	let settings: Record<string, unknown> = {};
-	try {
-		const raw = readFileSync(settingsPath, "utf8");
-		const parsed: unknown = JSON.parse(raw);
-		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-			settings = parsed as Record<string, unknown>;
-		}
-	} catch {
-		// Missing or unreadable settings file — skip.
-		return;
-	}
-
-	const needsThinkingFix = settings.hideThinkingBlock !== true;
-	const needsPadFix = settings.outputPad !== 0;
-	if (!needsThinkingFix && !needsPadFix) return;
-
-	const missing: string[] = [];
-	if (needsThinkingFix) missing.push("hideThinkingBlock: true");
-	if (needsPadFix) missing.push("outputPad: 0");
-
-	// In non-TUI modes (RPC, print), fall back to a one-time warning notification
-	// since interactive dialogs are unavailable.
-	if (ctx.mode !== "tui") {
-		ctx.ui.notify(
-			`Compact Transcript tip: set ${missing.join(", ")} in /settings for the best experience.`,
-			"warning",
-		);
-		return;
-	}
-
-	// Interactive confirm dialog.
-	const message = [
-		"Compact Transcript works best with:",
-		...missing.map((m) => `  • ${m}`),
-		"",
-		"Apply these recommended settings now?",
-	].join("\n");
-
-	ctx.ui.confirm("Compact Transcript", message).then((accepted) => {
-		if (accepted) {
-			// Re-read settings fresh (may have changed since we last read).
-			let current: Record<string, unknown> = {};
-			try {
-				const raw = readFileSync(settingsPath, "utf8");
-				const parsed: unknown = JSON.parse(raw);
-				if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-					current = parsed as Record<string, unknown>;
-				}
-			} catch {
-				// Shouldn't happen since we just read it, but handle gracefully.
-			}
-			if (needsThinkingFix) current.hideThinkingBlock = true;
-			if (needsPadFix) current.outputPad = 0;
-			writeFileSync(settingsPath, JSON.stringify(current, null, 2) + "\n", "utf8");
-			ctx.ui.notify(
-				"Compact Transcript settings applied! Reload to take effect (/reload).",
-				"info",
-			);
-		} else {
-			persistNagDismissed();
-			ctx.ui.notify(
-				"Compact Transcript tip dismissed. Adjust anytime via /settings.",
-				"info",
-			);
-		}
-	});
-}
-
 function setEnabled(enabled: boolean, pi: ExtensionAPI, ctx: ExtensionContext) {
 	state.config.enabled = enabled;
 	// Session entries represent only the command's enabled override; file-only
@@ -1458,7 +1347,7 @@ export default function compactTranscript(pi: ExtensionAPI) {
 		return new Text(theme.fg("muted", line), 0, 0);
 	});
 
-	pi.on("session_start", async (event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		restoreConfigFromBranch(ctx);
 		captureTheme(ctx);
 		// Drop all per-tool state and component registries from the previous
@@ -1474,10 +1363,6 @@ export default function compactTranscript(pi: ExtensionAPI) {
 		ctx.ui.setWorkingMessage();
 		// Clear any footer status left behind by pre-0.4 versions of this extension.
 		ctx.ui.setStatus(STATUS_KEY, undefined);
-
-		if (event.reason === "startup") {
-			checkAndNotifyRecommendedSettings(ctx);
-		}
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
