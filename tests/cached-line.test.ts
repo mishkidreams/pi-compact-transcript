@@ -80,3 +80,41 @@ test("actual compact tool rows skip repeated truncation while updates, resize an
 		await emit("session_shutdown");
 	}
 });
+
+for (const expanded of [false, true]) test(`streamed arguments flush once per frame in ${expanded ? "expanded" : "compact"} view before execution`, async () => {
+	initTheme("dark", false);
+	const handlers = new Map<string, Function>();
+	const ctx = { ui: { theme: { fg: (_color: string, text: string) => text, bold: (text: string) => text }, setStatus() {}, setWorkingMessage() {} } } as unknown as ExtensionContext;
+	compactTranscript({ on: (name: string, handler: Function) => handlers.set(name, handler), registerCommand() {}, registerEntryRenderer() {} } as unknown as ExtensionAPI);
+	const emit = (name: string) => handlers.get(name)?.({}, ctx);
+	emit("agent_start");
+	try {
+		let renderRequests = 0;
+		// Real argument deltas arrive before tool_execution_start or any result.
+		const tool = new ToolExecutionComponent("bash", `stream-${expanded}`, { command: "echo FIRST" }, {}, undefined, { requestRender() { renderRequests++; } } as unknown as TUI, process.cwd());
+		tool.setExpanded(expanded);
+		tool.render(120);
+		const native = tool as any;
+		const updateDisplay = native.updateDisplay;
+		let rebuilds = 0;
+		native.updateDisplay = function () { rebuilds++; return updateDisplay.call(this); };
+		const requestsBefore = renderRequests;
+		for (const command of ["echo SECOND", "echo THIRD", "echo LATEST 界🙂"]) tool.updateArgs({ command });
+		assert.equal(renderRequests - requestsBefore, 3, "each delta still requests a native frame");
+		assert.equal(rebuilds, 0, "argument deltas must retain native deferred batching");
+		assert.equal(native.argsPending, true);
+		const latest = tool.render(120);
+		assert.ok(latest.map(stripTerminalSequences).some(line => line.includes("LATEST 界🙂")), "the next frame shows the final delta");
+		assert.equal(native.argsPending, false, "compact rendering must consume the pending update");
+		assert.equal(rebuilds, 1, "multiple deltas rebuild only once");
+		for (let i = 0; i < 20; i++) assert.deepEqual(tool.render(120), latest);
+		assert.equal(rebuilds, 1, "unchanged frames must not repeatedly rebuild the display");
+		tool.updateArgs({ command: "echo NEXT" });
+		assert.equal(rebuilds, 1);
+		assert.ok(tool.render(120).map(stripTerminalSequences).some(line => line.includes("NEXT")));
+		assert.equal(rebuilds, 2);
+		assert.equal(native.argsPending, false);
+	} finally {
+		await emit("session_shutdown");
+	}
+});

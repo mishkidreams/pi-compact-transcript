@@ -850,6 +850,8 @@ function patchToolExecutionComponent() {
 	const originalSetExpanded = existing?.originalSetExpanded ?? proto.setExpanded;
 
 	proto.updateDisplay = function patchedUpdateDisplay() {
+		// Consume the host's deferred argument update even on compact-only paths.
+		this.argsPending = false;
 		if (!this.toolCallId || !this.toolName || !this.selfRenderContainer || typeof this.selfRenderContainer.clear !== "function") {
 			this.__compactTranscriptForceSelf = false;
 			this.__compactTranscriptHidden = false;
@@ -922,6 +924,8 @@ function patchToolExecutionComponent() {
 	};
 
 	proto.render = function patchedRender(width: number) {
+		// Match native render's once-per-frame flush before our early returns.
+		if (this.argsPending) this.updateDisplay();
 		if (isEnabled()) {
 			const owner = state.inlineOwners.get(this);
 			if (owner && owner !== this) return [];
